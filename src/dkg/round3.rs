@@ -29,11 +29,11 @@ use std::collections::BTreeMap;
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
+use crate::dkg::utils::{z_check_app_canary, zlog_stack};
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use crate::dkg::utils::{z_check_app_canary, zlog_stack};
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct PublicKeyPackage {
@@ -112,6 +112,7 @@ impl PublicKeyPackage {
     }
 }
 
+#[cfg(not(feature = "ledger"))]
 pub fn round3<'a, P, Q>(
     secret: &Secret,
     round2_secret_package: &[u8],
@@ -227,6 +228,152 @@ where
     zlog_stack("after round2_public_packages.iter()\0");
 
     assert_eq!(round2_public_packages.len(), round2_frost_packages.len());
+
+    let (key_package, public_key_package) = part3(
+        &round2_secret_package,
+        &round1_frost_packages,
+        &round2_frost_packages,
+    )?;
+
+    zlog_stack("after part3\0");
+
+    let public_key_package =
+        PublicKeyPackage::from_frost(public_key_package, identities, min_signers);
+
+    zlog_stack("after public_key_package\0");
+
+    Ok((
+        key_package,
+        public_key_package,
+        GroupSecretKeyShard::combine(&gsk_shards),
+    ))
+}
+
+#[cfg(feature = "ledger")]
+pub fn round3<'a, P, Q>(
+    secret: &Secret,
+    round2_secret_package: &[u8],
+    round1_public_packages: P,
+    round2_public_packages: Q,
+) -> Result<(KeyPackage, PublicKeyPackage, GroupSecretKey), IronfishFrostError>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+    Q: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
+{
+    z_check_app_canary();
+    zlog_stack("start round3\0");
+
+    let identity = secret.to_identity();
+    zlog_stack("round3 1\0");
+    let round2_secret_package = import_secret_package(round2_secret_package, secret)?;
+    // let round1_public_packages = round1_public_packages.into_iter().collect::<Vec<_>>();
+
+    let round1_public_packages_len = round1_public_packages.clone().into_iter().count();
+    let round2_public_packages_len = round2_public_packages.clone().into_iter().count();
+
+    // let round2_public_packages = round2_public_packages
+    // .into_iter()
+    // .flat_map(|combo| combo.packages_for(&identity));
+    // .collect::<Vec<_>>();
+    zlog_stack("round3 4\0");
+
+    let (min_signers, max_signers) = round2::get_secret_package_signers(&round2_secret_package);
+    zlog_stack("round3 5\0");
+
+    // Ensure that the number of public packages provided matches max_signers
+    let expected_round1_packages = max_signers as usize;
+    if round1_public_packages_len != expected_round1_packages {
+        return Err(IronfishFrostError::InvalidInput);
+    }
+
+    let expected_round2_packages = expected_round1_packages.saturating_sub(1);
+    if round2_public_packages_len != expected_round2_packages {
+        return Err(IronfishFrostError::InvalidInput);
+    }
+    zlog_stack("round3 6\0");
+
+    let expected_round1_checksum = round1::input_checksum(
+        min_signers,
+        round1_public_packages
+            .clone()
+            .into_iter()
+            .map(|pkg| pkg.identity()),
+    );
+    zlog_stack("after input_checksum\0");
+
+    let mut gsk_shards = Vec::with_capacity(round1_public_packages_len);
+    let mut round1_frost_packages = BTreeMap::new();
+    let mut identities = Vec::with_capacity(round1_public_packages_len);
+
+    for public_package in round1_public_packages.clone().into_iter() {
+        if public_package.checksum() != expected_round1_checksum {
+            return Err(IronfishFrostError::ChecksumError(
+                ChecksumError::DkgPublicPackageError,
+            ));
+        }
+
+        let identity = public_package.identity();
+        let frost_identifier = identity.to_frost_identifier();
+        let frost_package = public_package.frost_package().clone();
+
+        if round1_frost_packages
+            .insert(frost_identifier, frost_package)
+            .is_some()
+        {
+            return Err(IronfishFrostError::InvalidInput);
+        }
+
+        let gsk_shard = public_package.group_secret_key_shard(secret)?;
+        gsk_shards.push(gsk_shard);
+        identities.push(identity.clone());
+    }
+
+    zlog_stack("round1_public_packages.iter()\0");
+
+    // Sanity check
+    assert_eq!(round1_public_packages_len, round1_frost_packages.len());
+
+    // The public package for `identity` must be excluded from `frost::keys::dkg::part3`
+    // inputs
+    round1_frost_packages
+        .remove(&identity.to_frost_identifier())
+        .ok_or(IronfishFrostError::InvalidInput)?;
+    zlog_stack("round3 7\0");
+
+    let expected_round2_checksum =
+        round2::input_checksum(round1_public_packages.into_iter().map(Borrow::borrow));
+    zlog_stack("round3 8\0");
+
+    let mut round2_frost_packages = BTreeMap::new();
+    for public_package in round2_public_packages
+        .clone()
+        .into_iter()
+        .flat_map(|combo| combo.packages_for(&identity))
+    {
+        if public_package.checksum() != expected_round2_checksum {
+            return Err(IronfishFrostError::ChecksumError(
+                ChecksumError::DkgPublicPackageError,
+            ));
+        }
+
+        if !identity.eq(public_package.recipient_identity()) {
+            return Err(IronfishFrostError::InvalidInput);
+        }
+
+        let frost_identifier = public_package.sender_identity().to_frost_identifier();
+        let frost_package = public_package.frost_package().clone();
+
+        if round2_frost_packages
+            .insert(frost_identifier, frost_package)
+            .is_some()
+        {
+            return Err(IronfishFrostError::InvalidInput);
+        }
+    }
+
+    zlog_stack("after round2_public_packages.iter()\0");
+
+    assert_eq!(round2_public_packages_len, round2_frost_packages.len());
 
     let (key_package, public_key_package) = part3(
         &round2_secret_package,
