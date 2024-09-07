@@ -34,9 +34,9 @@ use core::mem;
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use crate::dkg::utils::{z_check_app_canary, zlog_stack};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use crate::dkg::utils::{z_check_app_canary, zlog_stack};
 
 type Scalar = <JubjubScalarField as Field>::Scalar;
 
@@ -167,6 +167,7 @@ pub fn import_secret_package(
     SerializableSecretPackage::deserialize_from(&serialized[..]).map(|pkg| pkg.into())
 }
 
+#[cfg(not(feature = "ledger"))]
 #[inline(never)]
 #[must_use]
 pub(super) fn input_checksum<'a, I>(min_signers: u16, participants: I) -> Checksum
@@ -182,6 +183,34 @@ where
 
     hasher.write(&min_signers.to_le_bytes());
 
+    for id in participants {
+        hasher.write(&id.serialize());
+    }
+
+    hasher.finish()
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+#[must_use]
+pub(super) fn input_checksum<'a, I>(min_signers: u16, participants: I) -> Checksum
+where
+    I: IntoIterator<Item = &'a Identity>,
+{
+    zlog_stack("start input_checksum\0");
+
+    // Use owned values
+    let mut participants = participants.into_iter().cloned().collect::<Vec<Identity>>();
+
+    participants.sort_unstable();
+    participants.dedup();
+    zlog_stack("participants_sorted\0");
+
+    let mut hasher = ChecksumHasher::new();
+
+    hasher.write(&min_signers.to_le_bytes());
+
+    zlog_stack("participants_final_loop\0");
     for id in participants {
         hasher.write(&id.serialize());
     }
@@ -266,17 +295,21 @@ impl PublicPackage {
         Ok(())
     }
 
+    #[inline(never)]
     pub fn deserialize_from<R: io::Read>(mut reader: R) -> Result<Self, IronfishFrostError> {
+        z_check_app_canary();
         let identity = Identity::deserialize_from(&mut reader).expect("reading identity failed");
 
         let frost_package = read_variable_length_bytes(&mut reader)?;
         let frost_package = Package::deserialize(&frost_package)?;
+        z_check_app_canary();
 
         let group_secret_key_shard_encrypted = read_variable_length_bytes(&mut reader)?;
 
         let mut checksum = [0u8; CHECKSUM_LEN];
         reader.read_exact(&mut checksum)?;
         let checksum = u64::from_le_bytes(checksum);
+        zlog_stack("done!!\0");
 
         Ok(Self {
             identity,

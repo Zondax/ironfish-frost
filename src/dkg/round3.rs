@@ -250,6 +250,7 @@ where
 }
 
 #[cfg(feature = "ledger")]
+#[inline(never)]
 pub fn round3<'a, P, Q>(
     secret: &Secret,
     round2_secret_package: &[u8],
@@ -260,37 +261,34 @@ where
     P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
     Q: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
 {
+    zlog_stack("ledger_round3**\0");
     z_check_app_canary();
-    zlog_stack("start round3\0");
 
     let identity = secret.to_identity();
-    zlog_stack("round3 1\0");
     let round2_secret_package = import_secret_package(round2_secret_package, secret)?;
-    // let round1_public_packages = round1_public_packages.into_iter().collect::<Vec<_>>();
+    z_check_app_canary();
 
-    let round1_public_packages_len = round1_public_packages.clone().into_iter().count();
-    let round2_public_packages_len = round2_public_packages.clone().into_iter().count();
+    // Using size_hint to reduce stack usage
+    let (round1_public_packages_len, _) = round1_public_packages.clone().into_iter().size_hint();
 
-    // let round2_public_packages = round2_public_packages
-    // .into_iter()
-    // .flat_map(|combo| combo.packages_for(&identity));
-    // .collect::<Vec<_>>();
-    zlog_stack("round3 4\0");
+    let (round2_public_packages_len, _) = round2_public_packages.clone().into_iter().size_hint();
+    zlog_stack("round3 2\0");
 
     let (min_signers, max_signers) = round2::get_secret_package_signers(&round2_secret_package);
-    zlog_stack("round3 5\0");
+    zlog_stack("round3 3\0");
 
     // Ensure that the number of public packages provided matches max_signers
     let expected_round1_packages = max_signers as usize;
     if round1_public_packages_len != expected_round1_packages {
         return Err(IronfishFrostError::InvalidInput);
     }
+    zlog_stack("round3 4\0");
 
     let expected_round2_packages = expected_round1_packages.saturating_sub(1);
     if round2_public_packages_len != expected_round2_packages {
         return Err(IronfishFrostError::InvalidInput);
     }
-    zlog_stack("round3 6\0");
+    zlog_stack("round3 5\0");
 
     let expected_round1_checksum = round1::input_checksum(
         min_signers,
@@ -311,6 +309,7 @@ where
                 ChecksumError::DkgPublicPackageError,
             ));
         }
+        zlog_stack("round1_loop_checksum\0");
 
         let identity = public_package.identity();
         let frost_identifier = identity.to_frost_identifier();
@@ -322,13 +321,13 @@ where
         {
             return Err(IronfishFrostError::InvalidInput);
         }
+        zlog_stack("round1_loop_frost\0");
 
         let gsk_shard = public_package.group_secret_key_shard(secret)?;
         gsk_shards.push(gsk_shard);
         identities.push(identity.clone());
     }
-
-    zlog_stack("round1_public_packages.iter()\0");
+    zlog_stack("round1_loop_done**\0");
 
     // Sanity check
     assert_eq!(round1_public_packages_len, round1_frost_packages.len());
@@ -338,11 +337,11 @@ where
     round1_frost_packages
         .remove(&identity.to_frost_identifier())
         .ok_or(IronfishFrostError::InvalidInput)?;
-    zlog_stack("round3 7\0");
+    zlog_stack("round3 5\0");
 
     let expected_round2_checksum =
         round2::input_checksum(round1_public_packages.into_iter().map(Borrow::borrow));
-    zlog_stack("round3 8\0");
+    zlog_stack("round3 6\0");
 
     let mut round2_frost_packages = BTreeMap::new();
     for public_package in round2_public_packages
@@ -355,6 +354,7 @@ where
                 ChecksumError::DkgPublicPackageError,
             ));
         }
+        zlog_stack("round3_loop2_checksum\0");
 
         if !identity.eq(public_package.recipient_identity()) {
             return Err(IronfishFrostError::InvalidInput);
@@ -369,12 +369,12 @@ where
         {
             return Err(IronfishFrostError::InvalidInput);
         }
+        zlog_stack("round3_loop2_frost\0");
     }
-
-    zlog_stack("after round2_public_packages.iter()\0");
 
     assert_eq!(round2_public_packages_len, round2_frost_packages.len());
 
+    zlog_stack("calling part3***\0");
     let (key_package, public_key_package) = part3(
         &round2_secret_package,
         &round1_frost_packages,
@@ -385,8 +385,6 @@ where
 
     let public_key_package =
         PublicKeyPackage::from_frost(public_key_package, identities, min_signers);
-
-    zlog_stack("after public_key_package\0");
 
     Ok((
         key_package,
