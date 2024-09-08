@@ -25,6 +25,7 @@ use crate::serde::write_u16;
 use crate::serde::write_variable_length;
 use crate::serde::write_variable_length_bytes;
 use core::borrow::Borrow;
+use core::ptr::addr_of_mut;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 
@@ -221,12 +222,16 @@ where
     I: IntoIterator<Item = &'a Identity>,
 {
     zlog_stack("sort_participants\0");
-    let mut sorted_set = alloc::collections::BTreeSet::new();
-    for participant in participants {
-        sorted_set.insert(participant.clone());
-    }
+    // let mut sorted_set = alloc::collections::BTreeSet::new();
+    let sorted = participants
+        .into_iter()
+        .map(|id| id.clone())
+        .collect::<alloc::collections::BTreeSet<Identity>>();
+    // for participant in participants {
+    // sorted_set.insert(participant.clone());
+    // }
     zlog_stack("participants_sorted\0");
-    sorted_set.into_iter()
+    sorted.into_iter()
 }
 
 // #[inline(never)]
@@ -326,7 +331,21 @@ impl PublicPackage {
     pub fn deserialize_from<R: io::Read>(mut reader: R) -> Result<Self, IronfishFrostError> {
         zlog_stack("PublicPackage::deserialize_from\0");
         z_check_app_canary();
-        let identity = Identity::deserialize_from(&mut reader).expect("reading identity failed");
+
+        let mut out = mem::MaybeUninit::uninit();
+        PublicPackage::deserialize_from_into(&mut reader, &mut out)?;
+
+        Ok(unsafe { out.assume_init() })
+    }
+
+    #[inline(never)]
+    pub fn deserialize_from_into<R: io::Read>(
+        mut reader: R,
+        output: &mut mem::MaybeUninit<PublicPackage>,
+    ) -> Result<(), IronfishFrostError> {
+        zlog_stack("PublicPackage::deserialize_from_into\0");
+        z_check_app_canary();
+        let identity = Identity::deserialize_from(&mut reader)?;
 
         let frost_package = read_variable_length_bytes(&mut reader)?;
         zlog_stack("des_frost_package\0");
@@ -341,12 +360,16 @@ impl PublicPackage {
         let checksum = u64::from_le_bytes(checksum);
         zlog_stack("done!!\0");
 
-        Ok(Self {
-            identity,
-            frost_package,
-            group_secret_key_shard_encrypted,
-            checksum,
-        })
+        let out = output.as_mut_ptr();
+        unsafe {
+            addr_of_mut!((*out).identity).write(identity);
+            addr_of_mut!((*out).frost_package).write(frost_package);
+            addr_of_mut!((*out).group_secret_key_shard_encrypted)
+                .write(group_secret_key_shard_encrypted);
+            addr_of_mut!((*out).checksum).write(checksum);
+        }
+
+        Ok(())
     }
 }
 

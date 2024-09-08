@@ -340,6 +340,7 @@ impl CombinedPublicPackage {
         )?)
     }
 
+    #[inline(never)]
     pub fn deserialize_from<R: io::Read>(mut reader: R) -> Result<Self, IronfishFrostError> {
         let sender_identity = Identity::deserialize_from(&mut reader)?;
 

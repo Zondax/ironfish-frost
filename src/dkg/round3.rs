@@ -44,6 +44,7 @@ pub struct PublicKeyPackage {
 
 impl PublicKeyPackage {
     #[must_use]
+    #[inline(never)]
     pub fn from_frost<I>(
         frost_public_key_package: FrostPublicKeyPackage,
         identities: I,
@@ -253,7 +254,7 @@ where
 #[inline(never)]
 fn compute_round1_frost<'a, P>(
     secret: &Secret,
-    round1_public_packages: P,
+    round1_public_packages: &P,
     expected_round1_checksum: u64,
     gsk_shards: &mut Vec<GroupSecretKeyShard>,
     identities: &mut Vec<Identity>,
@@ -265,11 +266,12 @@ fn compute_round1_frost<'a, P>(
     IronfishFrostError,
 >
 where
-    P: IntoIterator<Item = &'a round1::PublicPackage>,
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
 {
     let mut round1_frost_packages = BTreeMap::new();
+    let round1 = round1_public_packages.clone().into_iter();
 
-    for public_package in round1_public_packages.into_iter() {
+    for public_package in round1 {
         if public_package.checksum() != expected_round1_checksum {
             return Err(IronfishFrostError::ChecksumError(
                 ChecksumError::DkgPublicPackageError,
@@ -303,7 +305,7 @@ where
 #[inline(never)]
 fn compute_round2_frost<'a, P>(
     identity: &Identity,
-    round2_public_packages: P,
+    round2_public_packages: &P,
     expected_round2_checksum: u64,
 ) -> Result<
     BTreeMap<
@@ -313,13 +315,16 @@ fn compute_round2_frost<'a, P>(
     IronfishFrostError,
 >
 where
-    P: IntoIterator<Item = &'a round2::CombinedPublicPackage>,
+    P: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
 {
     let mut round2_frost_packages = BTreeMap::new();
-    for public_package in round2_public_packages
+
+    let round2 = round2_public_packages
+        .clone()
         .into_iter()
-        .flat_map(|combo| combo.packages_for(&identity))
-    {
+        .flat_map(|combo| combo.packages_for(&identity));
+
+    for public_package in round2 {
         if public_package.checksum() != expected_round2_checksum {
             return Err(IronfishFrostError::ChecksumError(
                 ChecksumError::DkgPublicPackageError,
@@ -348,6 +353,43 @@ where
 
 #[cfg(feature = "ledger")]
 #[inline(never)]
+fn compute_round1_checksum<'a, P>(
+    min_signers: u16,
+    round1_public_packages: &P,
+) -> Result<u64, IronfishFrostError>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+{
+    zlog_stack("compute_round1_checksum\0");
+    let iter = round1_public_packages
+        .clone()
+        .into_iter()
+        .map(|pkg| pkg.identity());
+
+    let checksum = round1::input_checksum(min_signers, iter);
+    Ok(checksum.into())
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+pub fn package_sizes<'a, P, Q>(
+    round1_public_packages: &P,
+    round2_public_packages: &Q,
+) -> (usize, usize)
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+    Q: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
+{
+    zlog_stack("package_sizes\0");
+    let (size_round1, _) = round1_public_packages.clone().into_iter().size_hint();
+    let (size_round2, _) = round2_public_packages.clone().into_iter().size_hint();
+    zlog_stack("package_sizes_done!\0");
+
+    (size_round1, size_round2)
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
 pub fn round3<'a, P, Q>(
     secret: &Secret,
     round2_secret_package: &[u8],
@@ -358,15 +400,16 @@ where
     P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
     Q: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
 {
-    zlog_stack("ledger_round3**\0");
+    zlog_stack("******LEDGER_ROUND3**\0");
 
     let identity = secret.to_identity();
-    let round2_secret_package = import_secret_package(round2_secret_package, secret)?;
+    let round2_secret_package =
+        alloc::boxed::Box::new(import_secret_package(round2_secret_package, secret)?);
 
     // Using size_hint to reduce stack usage
-    let (round1_public_packages_len, _) = round1_public_packages.clone().into_iter().size_hint();
+    let (round1_public_packages_len, round2_public_packages_len) =
+        package_sizes(&round1_public_packages, &round2_public_packages);
 
-    let (round2_public_packages_len, _) = round2_public_packages.clone().into_iter().size_hint();
     zlog_stack("round3 2\0");
 
     let (min_signers, max_signers) = round2::get_secret_package_signers(&round2_secret_package);
@@ -383,14 +426,8 @@ where
 
     zlog_stack("round3 4\0");
 
-    let expected_round1_checksum = round1::input_checksum(
-        min_signers,
-        round1_public_packages
-            .clone()
-            .into_iter()
-            .map(|ref pkg| pkg.identity()),
-    );
-    zlog_stack("round3 5\0");
+    let expected_round1_checksum = compute_round1_checksum(min_signers, &round1_public_packages)?;
+    // zlog_stack("round3 5\0");
 
     let mut gsk_shards = Vec::with_capacity(round1_public_packages_len);
     let mut identities = Vec::with_capacity(round1_public_packages_len);
@@ -398,14 +435,12 @@ where
     // ----------------------------------------------------------------------------------------------
     let mut round1_frost_packages = compute_round1_frost(
         secret,
-        round1_public_packages.clone(),
+        &round1_public_packages,
         expected_round1_checksum,
         &mut gsk_shards,
         &mut identities,
     )?;
     // ----------------------------------------------------------------------------------------------
-
-    zlog_stack("compute_round1_frost_done**\0");
 
     // Sanity check
     assert_eq!(round1_public_packages_len, round1_frost_packages.len());
@@ -423,24 +458,21 @@ where
     zlog_stack("round3 6\0");
 
     // ----------------------------------------------------------------------------------------------
-
-    let mut round2_frost_packages = compute_round2_frost(
-        &identity,
-        round2_public_packages.clone(),
-        expected_round2_checksum,
-    )?;
+    let mut round2_frost_packages =
+        compute_round2_frost(&identity, &round2_public_packages, expected_round2_checksum)?;
     // ----------------------------------------------------------------------------------------------
 
     zlog_stack("round3 7\0");
 
     assert_eq!(round2_public_packages_len, round2_frost_packages.len());
 
-    zlog_stack("calling part3***\0");
+    // zlog_stack("calling part3***\0");
     let (key_package, public_key_package) = part3(
         &round2_secret_package,
         &round1_frost_packages,
         &round2_frost_packages,
     )?;
+    drop(round2_secret_package);
 
     zlog_stack("after part3\0");
 
