@@ -199,24 +199,51 @@ where
 {
     zlog_stack("start input_checksum\0");
 
-    // Use owned values
-    let mut participants = participants.into_iter().cloned().collect::<Vec<Identity>>();
-
-    participants.sort_unstable();
-    participants.dedup();
-    zlog_stack("participants_sorted\0");
+    let participants = sort_participants(participants);
+    // let mut participants = participants.into_iter().cloned().sorted().dedup();
 
     let mut hasher = ChecksumHasher::new();
 
     hasher.write(&min_signers.to_le_bytes());
 
     zlog_stack("participants_final_loop\0");
+
     for id in participants {
         hasher.write(&id.serialize());
     }
 
     hasher.finish()
 }
+
+#[inline(never)]
+pub(super) fn sort_participants<'a, I>(participants: I) -> impl Iterator<Item = Identity>
+where
+    I: IntoIterator<Item = &'a Identity>,
+{
+    zlog_stack("sort_participants\0");
+    let mut sorted_set = alloc::collections::BTreeSet::new();
+    for participant in participants {
+        sorted_set.insert(participant.clone());
+    }
+    zlog_stack("participants_sorted\0");
+    sorted_set.into_iter()
+}
+
+// #[inline(never)]
+// pub(super) fn sort_participants<'a, I>(participants: I) -> Vec<Identity>
+// where
+//     I: IntoIterator<Item = &'a Identity>,
+// {
+//     zlog_stack("sort_participants\0");
+//     // Use owned values
+//     let mut participants = participants.into_iter().cloned().collect::<Vec<Identity>>();
+//     zlog_stack("participants_allocated\0");
+//
+//     participants.sort_unstable();
+//     participants.dedup();
+//     zlog_stack("participants_sorted\0");
+//     participants
+// }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PublicPackage {
@@ -297,14 +324,17 @@ impl PublicPackage {
 
     #[inline(never)]
     pub fn deserialize_from<R: io::Read>(mut reader: R) -> Result<Self, IronfishFrostError> {
+        zlog_stack("PublicPackage::deserialize_from\0");
         z_check_app_canary();
         let identity = Identity::deserialize_from(&mut reader).expect("reading identity failed");
 
         let frost_package = read_variable_length_bytes(&mut reader)?;
+        zlog_stack("des_frost_package\0");
         let frost_package = Package::deserialize(&frost_package)?;
         z_check_app_canary();
 
         let group_secret_key_shard_encrypted = read_variable_length_bytes(&mut reader)?;
+        zlog_stack("group_secret\0");
 
         let mut checksum = [0u8; CHECKSUM_LEN];
         reader.read_exact(&mut checksum)?;
