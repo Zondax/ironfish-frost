@@ -179,9 +179,7 @@ pub struct PublicPackage {
     checksum: Checksum,
 }
 
-#[cfg(not(feature = "ledger"))]
 #[must_use]
-#[inline(never)]
 pub(super) fn input_checksum<'a, P>(round1_packages: P) -> Checksum
 where
     P: IntoIterator<Item = &'a round1::PublicPackage>,
