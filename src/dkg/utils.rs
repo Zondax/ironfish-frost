@@ -17,14 +17,10 @@ pub fn zlog(buf: &str) {
     unsafe {
         zemu_log(buf.as_bytes().as_ptr())
     }
-    #[cfg(test)]
-    std::println!("{}", buf);
 }
 pub fn zlog_stack(buf: &str) {
     #[cfg(not(test))]
     unsafe {
         zemu_log_stack(buf.as_bytes().as_ptr())
     }
-    #[cfg(test)]
-    std::println!("{}", buf);
 }

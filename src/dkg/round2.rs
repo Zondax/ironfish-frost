@@ -38,12 +38,12 @@ use std::collections::BTreeMap;
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
+use crate::dkg::utils::{z_check_app_canary, zlog_stack};
+use crate::error::IronfishFrostError::InvalidScenario;
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use crate::dkg::utils::{z_check_app_canary, zlog_stack};
-use crate::error::IronfishFrostError::InvalidScenario;
 
 type Scalar = <JubjubScalarField as Field>::Scalar;
 
@@ -140,6 +140,7 @@ impl SerializableSecretPackage {
 }
 
 pub(super) fn get_secret_package_signers(pkg: &SecretPackage) -> (u16, u16) {
+    zlog_stack("get_secret_package_signers\0");
     let serializable = <&SerializableSecretPackage>::from(pkg);
     (serializable.min_signers, serializable.max_signers)
 }
@@ -178,7 +179,9 @@ pub struct PublicPackage {
     checksum: Checksum,
 }
 
+#[cfg(not(feature = "ledger"))]
 #[must_use]
+#[inline(never)]
 pub(super) fn input_checksum<'a, P>(round1_packages: P) -> Checksum
 where
     P: IntoIterator<Item = &'a round1::PublicPackage>,
@@ -192,6 +195,36 @@ where
 
     for package in round1_packages {
         hasher.write(&package.serialize());
+    }
+
+    hasher.finish()
+}
+
+#[cfg(feature = "ledger")]
+#[must_use]
+#[inline(never)]
+pub(super) fn input_checksum_lazy<'a, P>(round1_packages: P) -> Checksum
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+{
+    zlog_stack("round2::input_checksum_lazy\0");
+    let mut hasher = ChecksumHasher::new();
+
+    // First pass: collect identities and their indices
+    let mut identity_indices = BTreeMap::new();
+    for (index, package) in round1_packages.clone().into_iter().enumerate() {
+        identity_indices
+            .entry(package.identity().clone())
+            .or_insert(index);
+    }
+
+    // Second pass: hash the packages in sorted order
+    for (_identity, &index) in identity_indices.iter() {
+        let mut packages_iter = round1_packages.clone().into_iter();
+        if let Some(package) = packages_iter.nth(index) {
+            let serialized = package.serialize();
+            hasher.write(&serialized);
+        }
     }
 
     hasher.finish()
@@ -339,6 +372,7 @@ impl CombinedPublicPackage {
         )?)
     }
 
+    #[inline(never)]
     pub fn deserialize_from<R: io::Read>(mut reader: R) -> Result<Self, IronfishFrostError> {
         let sender_identity = Identity::deserialize_from(&mut reader)?;
 
@@ -372,7 +406,7 @@ where
     R: RngCore + CryptoRng,
 {
     z_check_app_canary();
-    zlog_stack("start round2\0");
+    // zlog_stack("start round2\0");
 
     let self_identity = secret.to_identity();
     z_check_app_canary();
@@ -396,16 +430,13 @@ where
     );
     z_check_app_canary();
 
-    let (identities, round1_frost_packages) = process_public_packages(
-        &round1_public_packages,
-        expected_round1_checksum,
-    )?;
+    let (identities, round1_frost_packages) =
+        process_public_packages(&round1_public_packages, expected_round1_checksum)?;
     z_check_app_canary();
 
     let mut round1_frost_packages = round1_frost_packages;
 
-    match round1_frost_packages
-        .remove(&self_identity.to_frost_identifier()){
+    match round1_frost_packages.remove(&self_identity.to_frost_identifier()) {
         Some(_) => (),
         None => {
             return Err(InvalidScenario("missing public package for self_identity"));
@@ -439,8 +470,14 @@ where
 fn process_public_packages<'a>(
     round1_public_packages: &[&'a round1::PublicPackage],
     expected_round1_checksum: Checksum,
-) -> Result<(BTreeMap<Identifier, &'a Identity>, BTreeMap<Identifier, Round1Package>), IronfishFrostError> {
-    zlog_stack("start process_public_packages\0");
+) -> Result<
+    (
+        BTreeMap<Identifier, &'a Identity>,
+        BTreeMap<Identifier, Round1Package>,
+    ),
+    IronfishFrostError,
+> {
+    // zlog_stack("start process_public_packages\0");
 
     let mut identities = BTreeMap::new();
     let mut round1_frost_packages = BTreeMap::new();
@@ -481,11 +518,13 @@ fn create_round2_public_packages(
     let mut round2_public_packages = Vec::new();
 
     for (identifier, package) in round2_packages {
-        let identity = match identities.get(&identifier){
+        let identity = match identities.get(&identifier) {
             None => {
-                return Err(InvalidScenario("round2 generated package for unknown identifier"));
-            },
-            Some(i) => *i
+                return Err(InvalidScenario(
+                    "round2 generated package for unknown identifier",
+                ));
+            }
+            Some(i) => *i,
         };
 
         let public_package = PublicPackage::new(

@@ -8,6 +8,8 @@ use core::cell::OnceCell;
 use core::cmp;
 use core::hash::Hash;
 use core::hash::Hasher;
+use core::mem::MaybeUninit;
+use core::ptr::addr_of_mut;
 use ed25519_dalek::SecretKey;
 use ed25519_dalek::Signer;
 use ed25519_dalek::SigningKey;
@@ -237,6 +239,7 @@ impl Identity {
         Ok(())
     }
 
+    #[inline(never)]
     pub fn deserialize_from<R: io::Read>(mut reader: R) -> io::Result<Self> {
         let mut version = [0u8; VERSION_LEN];
         reader.read_exact(&mut version)?;
@@ -259,6 +262,45 @@ impl Identity {
 
         Self::new(verification_key, encryption_key, signature)
             .map_err(|_| io::Error::other("identity deserialization failed"))
+    }
+
+    #[inline(never)]
+    pub fn deserialize_from_into<R: io::Read>(
+        mut reader: R,
+        output: &mut MaybeUninit<Self>,
+    ) -> io::Result<()> {
+        let mut version = [0u8; VERSION_LEN];
+        reader.read_exact(&mut version)?;
+        if version != VERSION {
+            return Err(io::Error::other("unsupported serialization version number"));
+        }
+
+        let mut verification_key = [0u8; VERIFICATION_KEY_LEN];
+        reader.read_exact(&mut verification_key)?;
+        let verification_key = VerifyingKey::from_bytes(&verification_key)
+            .map_err(|_| io::Error::other("verifying key deserialization failed"))?;
+
+        let mut encryption_key = [0u8; ENCRYPTION_KEY_LEN];
+        reader.read_exact(&mut encryption_key)?;
+        let encryption_key = PublicKey::from(encryption_key);
+
+        let mut signature = [0u8; SIGNATURE_LEN];
+        reader.read_exact(&mut signature)?;
+        let signature = Signature::from(signature);
+
+        let out = output.as_mut_ptr();
+        unsafe {
+            addr_of_mut!((*out).verification_key).write(verification_key);
+            addr_of_mut!((*out).encryption_key).write(encryption_key);
+            addr_of_mut!((*out).signature).write(signature);
+
+            output
+                .assume_init_mut()
+                .verify()
+                .map_err(|_| io::Error::other("verifying identity failed"))?;
+        }
+
+        Ok(())
     }
 
     pub fn verify_data(&self, data: &[u8], signature: &Signature) -> Result<(), SignatureError> {

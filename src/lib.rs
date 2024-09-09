@@ -44,7 +44,7 @@ mod io {
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-mod io {
+pub mod io {
     use core::cmp;
     use core::mem;
 

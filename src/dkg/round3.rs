@@ -29,11 +29,11 @@ use std::collections::BTreeMap;
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
+use crate::dkg::utils::{z_check_app_canary, zlog_stack};
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use crate::dkg::utils::{z_check_app_canary, zlog_stack};
 
 #[derive(Clone, Eq, PartialEq, Debug)]
 pub struct PublicKeyPackage {
@@ -44,6 +44,7 @@ pub struct PublicKeyPackage {
 
 impl PublicKeyPackage {
     #[must_use]
+    #[inline(never)]
     pub fn from_frost<I>(
         frost_public_key_package: FrostPublicKeyPackage,
         identities: I,
@@ -112,6 +113,7 @@ impl PublicKeyPackage {
     }
 }
 
+#[cfg(not(feature = "ledger"))]
 pub fn round3<'a, P, Q>(
     secret: &Secret,
     round2_secret_package: &[u8],
@@ -240,6 +242,255 @@ where
         PublicKeyPackage::from_frost(public_key_package, identities, min_signers);
 
     zlog_stack("after public_key_package\0");
+
+    Ok((
+        key_package,
+        public_key_package,
+        GroupSecretKeyShard::combine(&gsk_shards),
+    ))
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+fn compute_round1_frost<'a, P>(
+    secret: &Secret,
+    round1_public_packages: &P,
+    expected_round1_checksum: u64,
+    gsk_shards: &mut Vec<GroupSecretKeyShard>,
+    identities: &mut Vec<Identity>,
+) -> Result<
+    BTreeMap<
+        reddsa::frost::redjubjub::Identifier,
+        reddsa::frost::redjubjub::keys::dkg::round1::Package,
+    >,
+    IronfishFrostError,
+>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+{
+    zlog_stack("compute_round1_frost\0");
+    let mut round1_frost_packages = BTreeMap::new();
+    let round1 = round1_public_packages.clone().into_iter();
+
+    for public_package in round1 {
+        if public_package.checksum() != expected_round1_checksum {
+            return Err(IronfishFrostError::ChecksumError(
+                ChecksumError::DkgPublicPackageError,
+            ));
+        }
+
+        let identity = public_package.identity();
+        let frost_identifier = identity.to_frost_identifier();
+        let frost_package = public_package.frost_package().clone();
+        z_check_app_canary();
+
+        if round1_frost_packages
+            .insert(frost_identifier, frost_package)
+            .is_some()
+        {
+            return Err(IronfishFrostError::InvalidInput);
+        }
+
+        let gsk_shard = public_package.group_secret_key_shard(secret)?;
+        gsk_shards.push(gsk_shard);
+        identities.push(identity.clone());
+        z_check_app_canary();
+    }
+
+    Ok(round1_frost_packages)
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+fn compute_round2_frost<'a, P>(
+    identity: &Identity,
+    round2_public_packages: &P,
+    expected_round2_checksum: u64,
+) -> Result<
+    BTreeMap<
+        reddsa::frost::redjubjub::Identifier,
+        reddsa::frost::redjubjub::keys::dkg::round2::Package,
+    >,
+    IronfishFrostError,
+>
+where
+    P: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
+{
+    zlog_stack("compute_round2_frost\0");
+    let mut round2_frost_packages = BTreeMap::new();
+
+    let round2 = round2_public_packages
+        .clone()
+        .into_iter()
+        .flat_map(|combo| combo.packages_for(&identity));
+
+    for public_package in round2 {
+        if public_package.checksum() != expected_round2_checksum {
+            return Err(IronfishFrostError::ChecksumError(
+                ChecksumError::DkgPublicPackageError,
+            ));
+        }
+
+        if !identity.eq(public_package.recipient_identity()) {
+            return Err(IronfishFrostError::InvalidInput);
+        }
+
+        let frost_identifier = public_package.sender_identity().to_frost_identifier();
+        let frost_package = public_package.frost_package().clone();
+
+        if round2_frost_packages
+            .insert(frost_identifier, frost_package)
+            .is_some()
+        {
+            return Err(IronfishFrostError::InvalidInput);
+        }
+    }
+
+    Ok(round2_frost_packages)
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+fn compute_round1_checksum<'a, P>(
+    min_signers: u16,
+    round1_public_packages: &P,
+) -> Result<u64, IronfishFrostError>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+{
+    zlog_stack("compute_round1_checksum\0");
+    let iter = round1_public_packages
+        .clone()
+        .into_iter()
+        .map(|pkg| pkg.identity());
+
+    let checksum = round1::input_checksum(min_signers, iter);
+    Ok(checksum.into())
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+fn compute_round2_checksum<'a, P>(round1_public_packages: &P) -> Result<u64, IronfishFrostError>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+{
+    zlog_stack("compute_round1_checksum\0");
+    let iter = round1_public_packages.clone();
+
+    let checksum = round2::input_checksum_lazy(iter);
+    Ok(checksum)
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+pub fn package_sizes<'a, P, Q>(
+    round1_public_packages: &P,
+    round2_public_packages: &Q,
+) -> (usize, usize)
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+    Q: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
+{
+    zlog_stack("package_sizes\0");
+    let (size_round1, _) = round1_public_packages.clone().into_iter().size_hint();
+    let (size_round2, _) = round2_public_packages.clone().into_iter().size_hint();
+    zlog_stack("package_sizes_done!\0");
+
+    (size_round1, size_round2)
+}
+
+// Ideally we should rename this function
+// to make it clear that it is use for lazy parsing
+// of input data, however this would require renaming
+// the tests bellow, so for now we run those tests by enabling
+// the ledger feature an ensure every change we did works fine
+#[cfg(feature = "ledger")]
+#[inline(never)]
+pub fn round3<'a, P, Q>(
+    secret: &Secret,
+    round2_secret_package: &[u8],
+    round1_public_packages: P,
+    round2_public_packages: Q,
+) -> Result<(KeyPackage, PublicKeyPackage, GroupSecretKey), IronfishFrostError>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+    Q: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
+{
+    zlog_stack("******LEDGER_ROUND3**\0");
+
+    let identity = secret.to_identity();
+    let round2_secret_package =
+        alloc::boxed::Box::new(import_secret_package(round2_secret_package, secret)?);
+
+    // Using size_hint to reduce stack usage
+    let (round1_public_packages_len, round2_public_packages_len) =
+        package_sizes(&round1_public_packages, &round2_public_packages);
+
+    zlog_stack("round3 2\0");
+
+    let (min_signers, max_signers) = round2::get_secret_package_signers(&round2_secret_package);
+    z_check_app_canary();
+
+    // Ensure that the number of public packages provided matches max_signers
+    if round1_public_packages_len != max_signers as usize {
+        return Err(IronfishFrostError::InvalidInput);
+    }
+
+    if round2_public_packages_len != (max_signers as usize).saturating_sub(1) {
+        return Err(IronfishFrostError::InvalidInput);
+    }
+
+    zlog_stack("round3 4\0");
+    let expected_round1_checksum = compute_round1_checksum(min_signers, &round1_public_packages)?;
+    let expected_round2_checksum = compute_round2_checksum(&round1_public_packages)?;
+    zlog_stack("round3 5\0");
+
+    let mut gsk_shards = Vec::with_capacity(round1_public_packages_len);
+    let mut identities = Vec::with_capacity(round1_public_packages_len);
+
+    // ----------------------------------------------------------------------------------------------
+    let mut round1_frost_packages = compute_round1_frost(
+        secret,
+        &round1_public_packages,
+        expected_round1_checksum,
+        &mut gsk_shards,
+        &mut identities,
+    )?;
+    // ----------------------------------------------------------------------------------------------
+    zlog_stack("round3 6\0");
+
+    // Sanity check
+    assert_eq!(round1_public_packages_len, round1_frost_packages.len());
+
+    // The public package for `identity` must be excluded from `frost::keys::dkg::part3`
+    // inputs
+    z_check_app_canary();
+    round1_frost_packages
+        .remove(&identity.to_frost_identifier())
+        .ok_or(IronfishFrostError::InvalidInput)?;
+
+    // ----------------------------------------------------------------------------------------------
+    zlog_stack("round3 8\0");
+    let round2_frost_packages =
+        compute_round2_frost(&identity, &round2_public_packages, expected_round2_checksum)?;
+    // ----------------------------------------------------------------------------------------------
+
+    zlog_stack("round3 9\0");
+
+    assert_eq!(round2_public_packages_len, round2_frost_packages.len());
+
+    // zlog_stack("calling part3***\0");
+    let (key_package, public_key_package) = part3(
+        &round2_secret_package,
+        &round1_frost_packages,
+        &round2_frost_packages,
+    )?;
+    drop(round2_secret_package);
+
+    zlog_stack("after part3\0");
+
+    let public_key_package =
+        PublicKeyPackage::from_frost(public_key_package, identities, min_signers);
 
     Ok((
         key_package,

@@ -25,6 +25,7 @@ use crate::serde::write_u16;
 use crate::serde::write_variable_length;
 use crate::serde::write_variable_length_bytes;
 use core::borrow::Borrow;
+use core::ptr::addr_of_mut;
 use rand_core::CryptoRng;
 use rand_core::RngCore;
 
@@ -34,9 +35,9 @@ use core::mem;
 #[cfg(not(feature = "std"))]
 extern crate alloc;
 
+use crate::dkg::utils::{z_check_app_canary, zlog_stack};
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
-use crate::dkg::utils::{z_check_app_canary, zlog_stack};
 
 type Scalar = <JubjubScalarField as Field>::Scalar;
 
@@ -167,6 +168,7 @@ pub fn import_secret_package(
     SerializableSecretPackage::deserialize_from(&serialized[..]).map(|pkg| pkg.into())
 }
 
+#[cfg(not(feature = "ledger"))]
 #[inline(never)]
 #[must_use]
 pub(super) fn input_checksum<'a, I>(min_signers: u16, participants: I) -> Checksum
@@ -187,6 +189,42 @@ where
     }
 
     hasher.finish()
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+#[must_use]
+pub(super) fn input_checksum<'a, I>(min_signers: u16, participants: I) -> Checksum
+where
+    I: IntoIterator<Item = &'a Identity>,
+{
+    zlog_stack("round1::input_checksum\0");
+
+    let participants = sort_participants(participants);
+
+    let mut hasher = ChecksumHasher::new();
+
+    hasher.write(&min_signers.to_le_bytes());
+
+    for id in participants {
+        hasher.write(&id.serialize());
+    }
+
+    hasher.finish()
+}
+
+#[inline(never)]
+pub(super) fn sort_participants<'a, I>(participants: I) -> impl Iterator<Item = Identity>
+where
+    I: IntoIterator<Item = &'a Identity>,
+{
+    // use a BTreeSet to reduce stack usage
+    let sorted = participants
+        .into_iter()
+        .map(|id| id.clone())
+        .collect::<alloc::collections::BTreeSet<Identity>>();
+
+    sorted.into_iter()
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -266,11 +304,33 @@ impl PublicPackage {
         Ok(())
     }
 
+    #[inline(never)]
     pub fn deserialize_from<R: io::Read>(mut reader: R) -> Result<Self, IronfishFrostError> {
-        let identity = Identity::deserialize_from(&mut reader).expect("reading identity failed");
+        zlog_stack("PublicPackage::deserialize_from\0");
+        z_check_app_canary();
+
+        let mut out = mem::MaybeUninit::uninit();
+        PublicPackage::deserialize_from_into(&mut reader, &mut out)?;
+
+        Ok(unsafe { out.assume_init() })
+    }
+
+    #[inline(never)]
+    pub fn deserialize_from_into<R: io::Read>(
+        mut reader: R,
+        output: &mut mem::MaybeUninit<PublicPackage>,
+    ) -> Result<(), IronfishFrostError> {
+        zlog_stack("PublicPackage::deserialize_from_into\0");
+        z_check_app_canary();
+        let out = output.as_mut_ptr();
+
+        let identity: &mut mem::MaybeUninit<Identity> =
+            unsafe { &mut *addr_of_mut!((*out).identity).cast() };
+        Identity::deserialize_from_into(&mut reader, identity)?;
 
         let frost_package = read_variable_length_bytes(&mut reader)?;
         let frost_package = Package::deserialize(&frost_package)?;
+        z_check_app_canary();
 
         let group_secret_key_shard_encrypted = read_variable_length_bytes(&mut reader)?;
 
@@ -278,12 +338,14 @@ impl PublicPackage {
         reader.read_exact(&mut checksum)?;
         let checksum = u64::from_le_bytes(checksum);
 
-        Ok(Self {
-            identity,
-            frost_package,
-            group_secret_key_shard_encrypted,
-            checksum,
-        })
+        unsafe {
+            addr_of_mut!((*out).frost_package).write(frost_package);
+            addr_of_mut!((*out).group_secret_key_shard_encrypted)
+                .write(group_secret_key_shard_encrypted);
+            addr_of_mut!((*out).checksum).write(checksum);
+        }
+
+        Ok(())
     }
 }
 

@@ -34,6 +34,7 @@ impl GroupSecretKeyShard {
     }
 
     #[must_use]
+    #[inline(never)]
     pub fn combine<'a, I: IntoIterator<Item = &'a Self>>(shards: I) -> GroupSecretKey {
         let mut shards = shards.into_iter();
         let mut key = shards
