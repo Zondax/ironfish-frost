@@ -179,7 +179,9 @@ pub struct PublicPackage {
     checksum: Checksum,
 }
 
+#[cfg(not(feature = "ledger"))]
 #[must_use]
+#[inline(never)]
 pub(super) fn input_checksum<'a, P>(round1_packages: P) -> Checksum
 where
     P: IntoIterator<Item = &'a round1::PublicPackage>,
@@ -193,6 +195,63 @@ where
 
     for package in round1_packages {
         hasher.write(&package.serialize());
+    }
+
+    hasher.finish()
+}
+
+#[cfg(feature = "ledger")]
+#[must_use]
+#[inline(never)]
+pub(super) fn input_checksum<'a, P>(round1_packages: P) -> Checksum
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage>,
+{
+    zlog_stack("round2::input_checksum\0");
+    let mut hasher = ChecksumHasher::new();
+
+    // TODO: This wont work with lazy parsing because each P in list is replaced with
+    // the following one
+    let mut round1_packages = round1_packages.into_iter().collect::<Vec<_>>();
+    zlog_stack("collected**\0");
+
+    // unfortunate we need to clone identities
+    round1_packages.sort_unstable_by_key(|p| p.identity());
+    round1_packages.dedup();
+    let round1_packages = round1_packages;
+
+    for package in round1_packages {
+        hasher.write(&package.serialize());
+    }
+
+    hasher.finish()
+}
+
+#[cfg(feature = "ledger")]
+#[must_use]
+#[inline(never)]
+pub(super) fn input_checksum_lazy<'a, P>(round1_packages: P) -> Checksum
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+{
+    zlog_stack("round2::input_checksum_lazy\0");
+    let mut hasher = ChecksumHasher::new();
+
+    // First pass: collect identities and their indices
+    let mut identity_indices = BTreeMap::new();
+    for (index, package) in round1_packages.clone().into_iter().enumerate() {
+        identity_indices
+            .entry(package.identity().clone())
+            .or_insert(index);
+    }
+
+    // Second pass: hash the packages in sorted order
+    for (_identity, &index) in identity_indices.iter() {
+        let mut packages_iter = round1_packages.clone().into_iter();
+        if let Some(package) = packages_iter.nth(index) {
+            let serialized = package.serialize();
+            hasher.write(&serialized);
+        }
     }
 
     hasher.finish()

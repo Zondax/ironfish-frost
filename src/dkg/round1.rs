@@ -198,7 +198,7 @@ pub(super) fn input_checksum<'a, I>(min_signers: u16, participants: I) -> Checks
 where
     I: IntoIterator<Item = &'a Identity>,
 {
-    zlog_stack("start input_checksum\0");
+    zlog_stack("round1::input_checksum\0");
 
     let participants = sort_participants(participants);
     // let mut participants = participants.into_iter().cloned().sorted().dedup();
@@ -206,8 +206,6 @@ where
     let mut hasher = ChecksumHasher::new();
 
     hasher.write(&min_signers.to_le_bytes());
-
-    zlog_stack("participants_final_loop\0");
 
     for id in participants {
         hasher.write(&id.serialize());
@@ -221,34 +219,14 @@ pub(super) fn sort_participants<'a, I>(participants: I) -> impl Iterator<Item = 
 where
     I: IntoIterator<Item = &'a Identity>,
 {
-    zlog_stack("sort_participants\0");
     // let mut sorted_set = alloc::collections::BTreeSet::new();
     let sorted = participants
         .into_iter()
         .map(|id| id.clone())
         .collect::<alloc::collections::BTreeSet<Identity>>();
-    // for participant in participants {
-    // sorted_set.insert(participant.clone());
-    // }
-    zlog_stack("participants_sorted\0");
+
     sorted.into_iter()
 }
-
-// #[inline(never)]
-// pub(super) fn sort_participants<'a, I>(participants: I) -> Vec<Identity>
-// where
-//     I: IntoIterator<Item = &'a Identity>,
-// {
-//     zlog_stack("sort_participants\0");
-//     // Use owned values
-//     let mut participants = participants.into_iter().cloned().collect::<Vec<Identity>>();
-//     zlog_stack("participants_allocated\0");
-//
-//     participants.sort_unstable();
-//     participants.dedup();
-//     zlog_stack("participants_sorted\0");
-//     participants
-// }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PublicPackage {
@@ -345,24 +323,23 @@ impl PublicPackage {
     ) -> Result<(), IronfishFrostError> {
         zlog_stack("PublicPackage::deserialize_from_into\0");
         z_check_app_canary();
-        let identity = Identity::deserialize_from(&mut reader)?;
+        let out = output.as_mut_ptr();
+
+        let identity: &mut mem::MaybeUninit<Identity> =
+            unsafe { &mut *addr_of_mut!((*out).identity).cast() };
+        Identity::deserialize_from_into(&mut reader, identity)?;
 
         let frost_package = read_variable_length_bytes(&mut reader)?;
-        zlog_stack("des_frost_package\0");
         let frost_package = Package::deserialize(&frost_package)?;
         z_check_app_canary();
 
         let group_secret_key_shard_encrypted = read_variable_length_bytes(&mut reader)?;
-        zlog_stack("group_secret\0");
 
         let mut checksum = [0u8; CHECKSUM_LEN];
         reader.read_exact(&mut checksum)?;
         let checksum = u64::from_le_bytes(checksum);
-        zlog_stack("done!!\0");
 
-        let out = output.as_mut_ptr();
         unsafe {
-            addr_of_mut!((*out).identity).write(identity);
             addr_of_mut!((*out).frost_package).write(frost_package);
             addr_of_mut!((*out).group_secret_key_shard_encrypted)
                 .write(group_secret_key_shard_encrypted);
