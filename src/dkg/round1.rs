@@ -201,7 +201,6 @@ where
     zlog_stack("round1::input_checksum\0");
 
     let participants = sort_participants(participants);
-    // let mut participants = participants.into_iter().cloned().sorted().dedup();
 
     let mut hasher = ChecksumHasher::new();
 
@@ -219,7 +218,7 @@ pub(super) fn sort_participants<'a, I>(participants: I) -> impl Iterator<Item = 
 where
     I: IntoIterator<Item = &'a Identity>,
 {
-    // let mut sorted_set = alloc::collections::BTreeSet::new();
+    // use a BTreeSet to reduce stack usage
     let sorted = participants
         .into_iter()
         .map(|id| id.clone())

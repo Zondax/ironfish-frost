@@ -358,6 +358,7 @@ fn compute_round1_checksum<'a, P>(
 where
     P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
 {
+    zlog_stack("compute_round1_checksum\0");
     let iter = round1_public_packages
         .clone()
         .into_iter()
@@ -373,6 +374,7 @@ fn compute_round2_checksum<'a, P>(round1_public_packages: &P) -> Result<u64, Iro
 where
     P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
 {
+    zlog_stack("compute_round1_checksum\0");
     let iter = round1_public_packages.clone();
 
     let checksum = round2::input_checksum_lazy(iter);
@@ -389,12 +391,19 @@ where
     P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
     Q: IntoIterator<Item = &'a round2::CombinedPublicPackage> + Clone,
 {
+    zlog_stack("package_sizes\0");
     let (size_round1, _) = round1_public_packages.clone().into_iter().size_hint();
     let (size_round2, _) = round2_public_packages.clone().into_iter().size_hint();
+    zlog_stack("package_sizes_done!\0");
 
     (size_round1, size_round2)
 }
 
+// Ideally we should rename this function
+// to make it clear that it is use for lazy parsing
+// of input data, however this would require renaming
+// the tests bellow, so for now we run those tests by enabling
+// the ledger feature an ensure every change we did works fine
 #[cfg(feature = "ledger")]
 #[inline(never)]
 pub fn round3<'a, P, Q>(
@@ -470,6 +479,7 @@ where
 
     assert_eq!(round2_public_packages_len, round2_frost_packages.len());
 
+    // zlog_stack("calling part3***\0");
     let (key_package, public_key_package) = part3(
         &round2_secret_package,
         &round1_frost_packages,
