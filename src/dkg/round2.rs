@@ -420,98 +420,65 @@ pub fn round2<'a, P, R>(
     round1_secret_package: &[u8],
     round1_public_packages: P,
     mut csrng: R,
-) -> Result<(Vec<u8>, CombinedPublicPackage), Error>
+) -> Result<(Vec<u8>, CombinedPublicPackage), IronfishFrostError>
 where
     P: IntoIterator<Item = &'a round1::PublicPackage>,
     R: RngCore + CryptoRng,
 {
-    let self_identity = secret.to_identity();
-    let round1_secret_package = round1::import_secret_package(round1_secret_package, secret)
-        .map_err(Error::DecryptionError)?;
+    z_check_app_canary();
+    zlog_stack("start round2\0");
 
-    // Extract the min/max signers from the secret package
+    let self_identity = secret.to_identity();
+    z_check_app_canary();
+
+    let round1_secret_package = round1::import_secret_package(round1_secret_package, secret)?;
+    z_check_app_canary();
+
     let (min_signers, max_signers) = round1::get_secret_package_signers(&round1_secret_package);
+    z_check_app_canary();
 
     let round1_public_packages = round1_public_packages.into_iter().collect::<Vec<_>>();
+    z_check_app_canary();
 
-    // Ensure that the number of public packages provided matches max_signers
     if round1_public_packages.len() != max_signers as usize {
-        return Err(Error::InvalidInput(format!(
-            "expected {} public packages, got {}",
-            max_signers,
-            round1_public_packages.len()
-        )));
+        return Err(IronfishFrostError::InvalidInput);
     }
 
     let expected_round1_checksum = round1::input_checksum(
         min_signers,
         round1_public_packages.iter().map(|pkg| pkg.identity()),
     );
+    z_check_app_canary();
 
-    let mut identities = BTreeMap::new();
-    let mut round1_frost_packages: BTreeMap<Identifier, Round1Package> = BTreeMap::new();
-    for public_package in round1_public_packages.clone() {
-        if public_package.checksum() != expected_round1_checksum {
-            return Err(Error::ChecksumError(ChecksumError::DkgPublicPackageError));
+    let (identities, round1_frost_packages) =
+        process_public_packages(&round1_public_packages, expected_round1_checksum)?;
+    z_check_app_canary();
+
+    let mut round1_frost_packages = round1_frost_packages;
+
+    match round1_frost_packages.remove(&self_identity.to_frost_identifier()) {
+        Some(_) => (),
+        None => {
+            return Err(InvalidScenario("missing public package for self_identity"));
         }
+    };
+    z_check_app_canary();
 
-        let identity = public_package.identity();
-        let frost_identifier = identity.to_frost_identifier();
-        let frost_package = public_package.frost_package().clone();
-
-        if round1_frost_packages
-            .insert(frost_identifier, frost_package)
-            .is_some()
-        {
-            return Err(Error::InvalidInput(format!(
-                "multiple public packages provided for identity {}",
-                public_package.identity()
-            )));
-        }
-
-        identities.insert(frost_identifier, identity);
-        round1_frost_packages.insert(
-            public_package.identity().to_frost_identifier(),
-            public_package.frost_package().clone(),
-        );
-    }
-
-    // Sanity check
-    assert_eq!(round1_public_packages.len(), identities.len());
-    assert_eq!(round1_public_packages.len(), round1_frost_packages.len());
-
-    // The public package for `self_identity` must be excluded from `frost::keys::dkg::part2`
-    // inputs
-    round1_frost_packages
-        .remove(&self_identity.to_frost_identifier())
-        .expect("missing public package for self_identity");
-
-    // Run the FROST DKG round 2
     let (round2_secret_package, round2_packages) =
-        frost::keys::dkg::part2(round1_secret_package.clone(), &round1_frost_packages)
-            .map_err(Error::FrostError)?;
+        frost::keys::dkg::part2(round1_secret_package.clone(), &round1_frost_packages)?;
+    z_check_app_canary();
 
-    // Encrypt the secret package
     let encrypted_secret_package =
-        export_secret_package(&round2_secret_package, &self_identity, &mut csrng)
-            .map_err(Error::EncryptionError)?;
+        export_secret_package(&round2_secret_package, &self_identity, &mut csrng)?;
+    z_check_app_canary();
 
-    // Convert the Identifier->Package map to an Identity->PublicPackage map
-    let mut round2_public_packages = Vec::new();
-    for (identifier, package) in round2_packages {
-        let identity = *identities
-            .get(&identifier)
-            .expect("round2 generated package for unknown identifier");
-
-        let public_package = PublicPackage::new(
-            self_identity.clone(),
-            identity.clone(),
-            &round1_public_packages[..],
-            package,
-        );
-
-        round2_public_packages.push(public_package);
-    }
+    let round2_public_packages = create_round2_public_packages(
+        &identities,
+        &round1_public_packages,
+        round2_packages,
+        &self_identity,
+    )?;
+    z_check_app_canary();
 
     Ok((
         encrypted_secret_package,
@@ -562,6 +529,7 @@ where
 
     let (min_signers, max_signers) = round1::get_secret_package_signers(&round1_secret_package);
     z_check_app_canary();
+    zlog_stack("round2_1\0");
 
     let (round1_public_packages_len, _) = round1_public_packages.clone().into_iter().size_hint();
     z_check_app_canary();
