@@ -248,6 +248,26 @@ impl PublicPackage {
         }
     }
 
+    #[cfg(feature = "ledger")]
+    pub(crate) fn new_lazy<'a, P>(
+        sender_identity: Identity,
+        recipient_identity: Identity,
+        round1_packages: P,
+        frost_package: Package,
+    ) -> Self
+    where
+        P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+    {
+        let checksum = input_checksum_lazy(round1_packages);
+
+        PublicPackage {
+            sender_identity,
+            recipient_identity,
+            frost_package,
+            checksum,
+        }
+    }
+
     pub fn sender_identity(&self) -> &Identity {
         &self.sender_identity
     }
@@ -392,6 +412,7 @@ impl IntoIterator for CombinedPublicPackage {
     }
 }
 
+#[cfg(not(feature = "ledger"))]
 #[inline(never)]
 pub fn round2<'a, P, R>(
     secret: &participant::Secret,
@@ -404,7 +425,7 @@ where
     R: RngCore + CryptoRng,
 {
     z_check_app_canary();
-    // zlog_stack("start round2\0");
+    zlog_stack("start round2\0");
 
     let self_identity = secret.to_identity();
     z_check_app_canary();
@@ -464,6 +485,107 @@ where
     ))
 }
 
+#[cfg(feature = "ledger")]
+#[inline(never)]
+fn compute_round1_checksum<'a, P>(
+    min_signers: u16,
+    round1_public_packages: &P,
+) -> Result<u64, IronfishFrostError>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+{
+    zlog_stack("compute_round1_checksum\0");
+    let iter = round1_public_packages
+        .clone()
+        .into_iter()
+        .map(|pkg| pkg.identity());
+
+    let checksum = round1::input_checksum(min_signers, iter);
+
+    Ok(checksum.into())
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+pub fn round2<'a, P, R>(
+    secret: &participant::Secret,
+    round1_secret_package: &[u8],
+    round1_public_packages: P,
+    mut csrng: R,
+) -> Result<(Vec<u8>, CombinedPublicPackage), IronfishFrostError>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+    R: RngCore + CryptoRng,
+{
+    z_check_app_canary();
+    zlog_stack("start round2\0");
+
+    let self_identity = secret.to_identity();
+    z_check_app_canary();
+
+    let round1_secret_package = round1::import_secret_package(round1_secret_package, secret)?;
+    z_check_app_canary();
+
+    let (min_signers, max_signers) = round1::get_secret_package_signers(&round1_secret_package);
+    z_check_app_canary();
+    zlog_stack("round2_1\0");
+
+    let (round1_public_packages_len, _) = round1_public_packages.clone().into_iter().size_hint();
+    z_check_app_canary();
+    zlog_stack("round2_2\0");
+
+    if round1_public_packages_len != max_signers as usize {
+        return Err(IronfishFrostError::InvalidInput);
+    }
+
+    let expected_round1_checksum = compute_round1_checksum(min_signers, &round1_public_packages)?;
+    z_check_app_canary();
+    zlog_stack("round2_3\0");
+
+    // FIXME: main issue here, this computes BTrees using public_package.itentity()
+    // that means references, which is not compatible with our lazy parser
+    let (identities, mut round1_frost_packages) =
+        process_public_packages_lazy(round1_public_packages.clone(), expected_round1_checksum)?;
+    zlog_stack("round2_4\0");
+
+    z_check_app_canary();
+
+    match round1_frost_packages.remove(&self_identity.to_frost_identifier()) {
+        Some(_) => (),
+        None => {
+            return Err(InvalidScenario("missing public package for self_identity"));
+        }
+    };
+    z_check_app_canary();
+
+    zlog_stack("call_part2\0");
+    let (round2_secret_package, round2_packages) =
+        frost::keys::dkg::part2(round1_secret_package.clone(), &round1_frost_packages)?;
+    // Free up memory
+    drop(round1_frost_packages);
+    zlog_stack("round2_5\0");
+
+    z_check_app_canary();
+
+    let encrypted_secret_package =
+        export_secret_package(&round2_secret_package, &self_identity, &mut csrng)?;
+    z_check_app_canary();
+
+    let round2_public_packages = create_round2_public_packages_lazy(
+        &identities,
+        round1_public_packages,
+        round2_packages,
+        &self_identity,
+    )?;
+    z_check_app_canary();
+    zlog_stack("round2_6\0");
+
+    Ok((
+        encrypted_secret_package,
+        CombinedPublicPackage::new(round2_public_packages),
+    ))
+}
+
 #[inline(never)]
 fn process_public_packages<'a>(
     round1_public_packages: &[&'a round1::PublicPackage],
@@ -488,6 +610,48 @@ fn process_public_packages<'a>(
         }
 
         let identity = public_package.identity();
+        let frost_identifier = identity.to_frost_identifier();
+        let frost_package = public_package.frost_package().clone();
+
+        if round1_frost_packages
+            .insert(frost_identifier, frost_package)
+            .is_some()
+        {
+            return Err(IronfishFrostError::InvalidInput);
+        }
+
+        identities.insert(frost_identifier, identity);
+    }
+
+    Ok((identities, round1_frost_packages))
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+fn process_public_packages_lazy<'a, P>(
+    round1_public_packages: P,
+    expected_round1_checksum: Checksum,
+) -> Result<
+    (
+        BTreeMap<Identifier, Identity>,
+        BTreeMap<Identifier, Round1Package>,
+    ),
+    IronfishFrostError,
+>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage>,
+{
+    let mut identities = BTreeMap::new();
+    let mut round1_frost_packages = BTreeMap::new();
+
+    for public_package in round1_public_packages {
+        if public_package.checksum() != expected_round1_checksum {
+            return Err(IronfishFrostError::ChecksumError(
+                ChecksumError::DkgPublicPackageError,
+            ));
+        }
+
+        let identity = public_package.identity().clone();
         let frost_identifier = identity.to_frost_identifier();
         let frost_package = public_package.frost_package().clone();
 
@@ -535,6 +699,42 @@ fn create_round2_public_packages(
         round2_public_packages.push(public_package);
     }
 
+    Ok(round2_public_packages)
+}
+
+#[cfg(feature = "ledger")]
+#[inline(never)]
+fn create_round2_public_packages_lazy<'a, P>(
+    identities: &BTreeMap<Identifier, Identity>,
+    round1_public_packages: P,
+    round2_packages: BTreeMap<Identifier, Package>,
+    self_identity: &Identity,
+) -> Result<Vec<PublicPackage>, IronfishFrostError>
+where
+    P: IntoIterator<Item = &'a round1::PublicPackage> + Clone,
+{
+    zlog_stack("start create_round2_public_packages\0");
+    let mut round2_public_packages = Vec::with_capacity(round2_packages.len());
+
+    for (identifier, package) in round2_packages.into_iter() {
+        let identity = match identities.get(&identifier) {
+            None => {
+                return Err(InvalidScenario(
+                    "round2 generated package for unknown identifier".into(),
+                ));
+            }
+            Some(i) => i,
+        };
+        let round1_public_packages = round1_public_packages.clone();
+
+        let public_package = PublicPackage::new_lazy(
+            self_identity.clone(),
+            identity.clone(),
+            round1_public_packages,
+            package,
+        );
+        round2_public_packages.push(public_package);
+    }
     Ok(round2_public_packages)
 }
 
